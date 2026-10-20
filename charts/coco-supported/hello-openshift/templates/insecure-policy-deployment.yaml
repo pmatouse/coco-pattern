@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insecure-policy
+  labels:
+    app: insecure-policy
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: insecure-policy
+  template:
+    metadata:
+      labels:
+        app: insecure-policy
+      annotations:
+        coco.io/initdata-configmap: debug-initdata
+    spec:
+      runtimeClassName: {{ include "hello-openshift.runtimeClassName" . }}
+      containers:
+        - name: hello-openshift
+          image: {{ .Values.image }}
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: web-content
+              mountPath: /var/www/html
+            - name: initdata
+              mountPath: /opt/confidential-containers/initdata
+              readOnly: true
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: web-content
+          configMap:
+            name: insecure-policy-web-content
+        - name: initdata
+          configMap:
+            name: debug-initdata
+            optional: false

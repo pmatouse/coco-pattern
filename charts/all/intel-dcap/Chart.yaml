@@ -1,0 +1,9 @@
+apiVersion: v2
+description: Intel DCAP operator CR (TDX QGS offline mode) and SGX device plugin.
+keywords:
+- pattern
+- intel
+- tdx
+- dcap-operator
+name: intel-dcap
+version: 0.1.0

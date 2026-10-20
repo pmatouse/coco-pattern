@@ -1,0 +1,6 @@
+collections:
+  - azure.azcollection
+  # Modules installed by default in the utility container, required for linting
+  - community.general
+  - community.crypto
+  - kubernetes.core

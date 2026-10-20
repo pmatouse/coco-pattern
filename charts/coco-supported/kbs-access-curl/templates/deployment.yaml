@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kbs-access-curl
+  labels:
+    app: kbs-access-curl
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kbs-access-curl
+  template:
+    metadata:
+      labels:
+        app: kbs-access-curl
+      annotations:
+        peerpods: "true"
+        coco.io/initdata-configmap: debug-initdata
+        {{- if .Values.defaultMemory }}
+        io.katacontainers.config.hypervisor.default_memory: {{ .Values.defaultMemory | quote }}
+        {{- end }}
+        io.katacontainers.config.runtime.create_container_timeout: "900"
+    spec:
+      serviceAccountName: kbs-access-curl
+      {{- $clusterGroupName := get (.Values.clusterGroup | default dict) "name" }}
+      {{- if or (eq $clusterGroupName "azure") (eq $clusterGroupName "azure-spoke") }}
+      # Azure peer-pods use the ACM-distributed pull secret; other groups use KBS.
+      imagePullSecrets:
+        - name: pull-secret
+      {{- end }}
+      runtimeClassName: {{ .Values.global.coco.runtimeClassName }}
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: httpd
+          image: {{ .Values.image }}
+          ports:
+            - containerPort: 8080
+          securityContext:
+            privileged: true
+          volumeMounts:
+          - name: shared-volume
+            mountPath: /var/www/html
+          - name: initdata
+            mountPath: /opt/confidential-containers/initdata
+            readOnly: true
+      initContainers:
+      - name: curl
+        image: {{ .Values.initImage }}
+        command: ['sh', '-c', 'curl -s http://127.0.0.1:8006/cdh/resource/default/kbsres1/key3 > /var/www/html/secret.txt']
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: shared-volume
+          mountPath: /var/www/html
+      volumes:
+      - name: shared-volume
+        emptyDir: {}
+      - name: initdata
+        configMap:
+          name: debug-initdata
+          optional: false

@@ -1,0 +1,222 @@
+# coco-pattern
+
+This fork adds a confidential Qwen demo using Red Hat OpenShift AI. See the
+[installation runbook](docs/rhoai/install.md), [architecture and model-to-chat execution trace](docs/rhoai/end-to-end.md), and
+[stock upstream base and additions](docs/rhoai/stock-base.md). The extension
+offers `intel-tdx-gpu` and `amd-snp-gpu`; the optional test installation and its
+hardware qualification limits are recorded under [testing/cluster-01](testing/cluster-01/README.md).
+
+Validated pattern for deploying confidential containers on OpenShift using the [Validated Patterns](https://validatedpatterns.io/) framework.
+
+Confidential containers use hardware-backed Trusted Execution Environments (TEEs) to isolate workloads from cluster and hypervisor administrators. This pattern deploys and configures the Red Hat CoCo stack — including the sandboxed containers operator, Trustee (Key Broker Service) operator, and Kata infrastructure — on Azure cloud instances and bare metal.
+
+## Topologies
+
+The pattern provides four deployment topologies:
+
+1. **Single cluster** (`azure` clusterGroup) — deploys all components (Trustee, Vault, ACM, sandboxed containers, workloads) in one cluster on Azure. This breaks the RACI separation expected in a remote attestation architecture but simplifies testing and demonstrations.
+
+2. **Multi-cluster** (`trusted-hub` + `azure-spoke` clusterGroups) — separates the trusted zone from the untrusted workload zone:
+   - **Hub** (`trusted-hub`): Runs Trustee (KBS + attestation service), HashiCorp Vault, ACM, and cert-manager. This cluster is the trust anchor.
+   - **Spoke** (`azure-spoke`): Runs the sandboxed containers operator and confidential workloads. The spoke is imported into ACM and managed from the hub.
+
+3. **Bare metal** (`baremetal` clusterGroup) — deploys all components on bare metal hardware with Intel TDX or AMD SEV-SNP support. NFD (Node Feature Discovery) auto-detects the CPU architecture and configures the appropriate runtime. Supports SNO (Single Node OpenShift) and multi-node clusters.
+
+   Hardware-specific operators (GPU, Intel device plugins, DCAP) are controlled by `global.hardware.profile`:
+   - `intel-tdx` — Intel TDX without GPU
+   - `amd-snp` — AMD SEV-SNP without GPU
+   - `intel-tdx-gpu` — Intel TDX with NVIDIA H100 GPU
+   - `amd-snp-gpu` — AMD SEV-SNP with NVIDIA H100 GPU
+
+The topology is controlled by the `main.clusterGroupName` field in `values-global.yaml`. For bare metal deployments, also set `global.hardware.profile` to match your hardware configuration.
+
+Azure deployments use peer-pods, which provision confidential VMs (`Standard_DCas_v5` family) directly on the Azure hypervisor. Bare metal deployments use layered images and hardware TEE features directly.
+
+## Current version (8.*)
+
+Breaking change from v5. Upgrades to OSC 1.13 / Trustee 1.2, adds full airgap (disconnected) deployment support, and introduces experimental KubeVirt TDX VM workloads.
+
+- **8.0** — OSC 1.13 / Trustee 1.2 upgrade. KBS TOML rewrite, RVPS format alignment, operator CSV pins, trustee-chart v0.10.0. Airgap deployment support: single mirror-registry architecture, `oc-mirror` v2, `airgap-post-install.sh` bootstrap, `DEPLOY-RUNBOOK.md` operational guide. Requires OCP 4.22+.
+
+**Key changes from v5:**
+
+- **Operator upgrade:** OSC 1.12 → 1.13, Trustee 1.1 → 1.2. Breaking API changes in KBS configuration and RVPS reference value format.
+- **Airgap support:** Full disconnected deployment on bare metal via a single mirror-registry. Includes `oc-mirror` imageset configs, `airgap-post-install.sh` for bootstrap (CatalogSources, IDMS/ITMS, NeverContactSource policy normalisation, ArgoCD CA injection, Git HTTP server), and a step-by-step operational runbook at `airgap/DEPLOY-RUNBOOK.md`.
+- **Chart architecture:** trustee-chart moved to OCI Helm artifact (`quay.io/validatedpatterns/trustee:0.10.0`). Kyverno chart vendored under `charts/vendor/`. External charts (sandboxed-containers, sandboxed-policies) remain OCI.
+- **TDX MachineConfig:** QGS socket port `socket_port=0` now deployed via MachineConfig drop-in (replaces manual `sed` workaround).
+- **DCAP collateral:** `collect-dcap-collateral.sh` uses `pcsclient.py fetch -p E5` with `jq` fixup for QeIdentity (Red Hat OSC 1.13 disconnected TDX procedure).
+- **TDX PCK lifecycle:** Make targets export platform data, generate PCK cache material on a connected low-side host, and import it into the disconnected high-side cluster. See [the air-gap runbook](airgap/DEPLOY-RUNBOOK.md#phase-e-dcap-and-tdx-attestation).
+- **Experimental:** KubeVirt TDX confidential VMs (`charts/all/kubevirtconfidential/`, `charts/all/kubevirtvm/`). Disabled by default. Requires Intel TDX hardware and KubeVirt post-v1.8.4 for full QGS attestation. See chart readmes for details.
+
+### Previous versions
+
+| Version | Trustee | OSC | Min OCP | Notes |
+|---------|---------|-----|---------|-------|
+| **5.*** | 1.1 (GA) | 1.12 | 4.19.28+ | Kyverno initdata injection, multi-cluster, bare metal, GPU |
+| **4.*** | 1.1 (GA) | 1.12 | 4.19.28+ | First GA release; MutatingAdmissionPolicy-based initdata |
+| **3.*** | 0.4.* (Tech Preview) | 1.10.* | 4.16+ | |
+| **2.*** | 0.3.* (Tech Preview) | 1.9.* | 4.16+ | |
+| **1.0.0** | 0.2.0 (Tech Preview) | 1.8.1 | 4.16+ | |
+
+### Airgap (disconnected) deployment
+
+For air-gapped bare metal environments, see [`airgap/DEPLOY-RUNBOOK.md`](airgap/DEPLOY-RUNBOOK.md) for the full operational procedure. The runbook covers:
+
+- Phase 0: One-time jump host setup (mirror registry, Git HTTP server, CA certificates)
+- Phase A–B: Mirror wipe and `oc-mirror` v2 re-mirror
+- Phase C: Agent-based OCP install
+- Phase D: Pattern bootstrap (`airgap-post-install.sh`)
+- Phase E: Intel DCAP collateral and TDX attestation
+- Phase F: Verification and pass/fail checklist
+
+**Prerequisites for airgap:**
+
+- A low-side host with Intel PCS access for mirroring, collateral collection, and PCK generation. A connected bastion with access to both Intel PCS and the target cluster can run the combined PCK target.
+- `docker.io/library/registry:2` container running as the mirror registry (setup documented in Phase 0)
+- `scripts/git-http-server.py` serving pattern repos over smart HTTP (required by the patterns-operator's go-git client)
+- All operator images, OCI Helm charts, and workload images mirrored via `airgap/imageset-config-4.22.yaml`
+
+## Setup
+
+### Prerequisites
+
+**Azure deployments:**
+
+- OpenShift 4.22+ cluster on Azure (self-managed via `openshift-install` or ARO)
+- Azure `Standard_DCas_v5` VM quota in your target region (these are confidential computing VMs and are not available in all regions). See the note below for more details.
+- Azure DNS hosting the cluster's DNS zone
+
+**Bare metal deployments:**
+
+- OpenShift 4.22+ cluster on bare metal with Intel TDX or AMD SEV-SNP hardware
+- BIOS/firmware configured to enable TDX or SEV-SNP
+- Available block devices for LVMS storage (auto-discovered)
+- For Intel TDX: an Intel PCS API key from [api.portal.trustedservices.intel.com](https://api.portal.trustedservices.intel.com/)
+
+**Common:**
+
+- Tools on your workstation: `podman`, `yq`, `jq`, `skopeo`
+- Python 3.10+ with the shared script dependencies: `python3 -m pip install -r requirements.txt`
+- OpenShift pull secret saved at `~/pull-secret.json` (download from [console.redhat.com](https://console.redhat.com/openshift/downloads)), or point elsewhere via the `PULL_SECRET` environment variable
+- Fork the repository — ArgoCD reconciles cluster state against your fork, so changes must be pushed to your remote
+
+### Secrets and reference value setup
+
+These scripts generate the cryptographic material and attestation reference values needed by Trustee. Run them once before your first deployment.
+
+1. `make gen-secrets` — generates KBS key pairs, sealed-secrets signing keys, and copies `values-secret.yaml.template` to `~/values-secret-coco-pattern.yaml`
+2. Collect attestation reference values (requires the shared Python dependencies above, `cosign` >= 2.0 for Azure, and `~/pull-secret.json` or `PULL_SECRET`). The OSC operator version is read from the pattern's own pinned values file (`clusterGroup.subscriptions.sandbox.csv`), not auto-detected from a live cluster — see `docs/firmware-reference-values.md`. By default this collects and merges reference values for **both TDX and SNP**:
+   - **Azure:** `make collect-azure-refvals` — pulls PCR measurements from the dm-verity image via veritas. Saves to `~/.coco-pattern/measurements.json`.
+   - **Bare metal:** `make collect-firmware-refvals` — computes firmware measurements from OCP release artifacts via veritas. Saves to `~/.coco-pattern/firmware-reference-values.json`. When collecting before cluster access is available, for example from a connected staging host preparing a disconnected deployment, set the target release explicitly: `OCP_VERSION=4.22.8 make collect-firmware-refvals`. `pcrStash` and `firmwareReferenceValues` are both enabled by default in `~/values-secret-coco-pattern.yaml`, so nothing needs to be uncommented — the collection script automatically writes an empty `{}` placeholder for the platform you're not using.
+   - See [docs/firmware-reference-values.md](docs/firmware-reference-values.md) for detailed workflow and options.
+3. Review and customise `~/values-secret-coco-pattern.yaml` — this file is loaded into Vault and provides secrets to the pattern.
+
+### Intel TDX PCK lifecycle
+
+All lifecycle actions are invoked with Make. `collect-dcap-collateral` prepares the pinned Intel tool automatically, then retrieves public verification collateral on the connected low side; transfer `~/.coco-pattern/dcap-offline/platform_collaterals.json` to the high side, then use the existing `make load-secrets` to load it into Vault.
+
+PCK certificates are platform-specific and use separate request and response bundles. On a disconnected high-side cluster, run `make dcap-platform-export`, transfer `~/.coco-pattern/dcap-pck/platform-request` to the connected low side, then run `make dcap-tools dcap-pck-generate`. Transfer `~/.coco-pattern/dcap-pck/pck-response` back to the high side and run `make dcap-pck-import`.
+
+When one bastion can reach both Intel PCS and the cluster, run `make dcap-pck-provision`. It resumes safely after interruption: matching request and unexpired response bundles are reused, while changed platform data replaces both bundles. The generator accepts `INTEL_PCS_API_KEY` from its environment for automation, or requests it through a hidden terminal prompt. Do not pass the key as a Make variable or command-line argument.
+
+The importer discovers the QGS DaemonSet from the `pck-certs-watcher` pod owner reference. Set `DCAP_QGS_DAEMONSET` only when that discovery cannot identify a single DaemonSet.
+
+> **Note:** `gen-secrets.sh` will not overwrite existing secrets. Delete `~/.coco-pattern/` if you need to regenerate.
+
+### Single cluster deployment (Azure)
+
+1. Set `main.clusterGroupName: azure` in `values-global.yaml`
+2. Ensure your Azure configuration is populated in `values-global.yaml` (see `global.azure.*` fields)
+3. `./pattern.sh make install`
+4. Wait for the cluster to reboot all nodes (the sandboxed containers operator triggers a MachineConfig update). Monitor progress in the ArgoCD UI.
+
+### Multi-cluster deployment (Azure)
+
+1. Set `main.clusterGroupName: trusted-hub` in `values-global.yaml`
+2. Deploy the hub cluster: `./pattern.sh make install`
+3. Wait for ACM (`MultiClusterHub`) to reach `Running` state on the hub
+4. Provision a second OpenShift 4.22+ cluster on Azure for the spoke
+5. Import the spoke into ACM with label `clusterGroup=azure-spoke`
+   (see [importing a cluster](https://validatedpatterns.io/learn/importing-a-cluster/))
+6. ACM will automatically deploy the `azure-spoke` clusterGroup applications (sandboxed containers, workloads) to the imported cluster
+
+### Bare metal deployment
+
+1. Set `main.clusterGroupName: baremetal` in `values-global.yaml`
+2. Set `global.hardware.profile` to match your hardware (this demo branch defaults to `intel-tdx-gpu`)
+   - Run `make detect-hardware` after NFD is deployed to detect your hardware profile automatically
+   - Options: `intel-tdx`, `amd-snp`, `intel-tdx-gpu`, `amd-snp-gpu`
+3. Run `bash scripts/gen-secrets.sh` to generate KBS keys and PCCS secrets
+4. `./pattern.sh make install`
+5. Wait for the cluster to reboot nodes (MachineConfig updates for TDX/SEV-SNP kernel parameters and vsock)
+
+> **Note:** Bare metal support is currently tested on SNO (Single Node OpenShift) configurations. Multi-node bare metal clusters are expected to work but have not been validated yet.
+
+The system auto-detects your hardware:
+
+- **NFD** discovers Intel TDX or AMD SEV-SNP capabilities and labels nodes
+- **LVMS** auto-discovers available block devices for storage
+- **RuntimeClass** `kata-cc` is created automatically pointing to the correct handler (`kata-tdx` or `kata-snp`)
+- Both `kata-tdx` and `kata-snp` RuntimeClasses are deployed; only the one matching your hardware has schedulable nodes
+- MachineConfigs are deployed for both `master` and `worker` roles (safe on SNO where only master exists)
+- DCAP QGS (Quote Generation Service) deploys on Intel nodes via NFD labels; offline collateral mode (no PCCS server required)
+
+For GPU-enabled deployments (`intel-tdx-gpu` or `amd-snp-gpu` profiles):
+
+- IOMMU MachineConfig is deployed on all nodes and will trigger reboots
+- Approve the GPU Operator install plan when it appears (uses `installPlanApproval: Manual`)
+- A sample CUDA workload (`gpu-workload`) is deployed for CC GPU verification
+
+## Sample applications
+
+Two sample applications are deployed on the cluster running confidential workloads (the single cluster in `azure` mode, or the spoke in multi-cluster mode):
+
+- **hello-openshift**: Three pods demonstrating CoCo security boundaries:
+  - `standard` — a regular Kubernetes pod (no confidential computing)
+  - `secure` — a confidential container with a strict policy; `oc exec` is denied even for `kubeadmin`
+  - `insecure-policy` — a confidential container with a relaxed policy allowing `oc exec` (useful for testing the Confidential Data Hub)
+
+  On Azure, each confidential pod runs on its own `Standard_DC2as_v5` Azure VM (visible in the Azure portal) using `runtimeClassName: kata-remote`. On bare metal, pods use `runtimeClassName: kata-cc` and run directly on the underlying TDX or SEV-SNP hardware.
+
+- **kbs-access**: A web service that retrieves and presents secrets obtained from the Trustee Key Broker Service (KBS) via the Confidential Data Hub (CDH). Useful for verifying end-to-end attestation and secret delivery in locked-down environments.
+
+## Confidential computing virtual machine availability on Microsoft Azure
+
+Confidential computing VM availability on Azure varies by region. Not all regions offer the required VM families, and available sizes differ between regions. Before deploying, verify the following:
+
+1. **Check regional availability.** Confirm that your target Azure region supports confidential computing VMs. Microsoft's [products available by region](https://azure.microsoft.com/en-us/explore/global-infrastructure/products-by-region/) page lists which services and VM families are offered in each region.
+
+2. **Check your subscription quota.** Even in supported regions, your subscription may have zero default quota for confidential VM sizes. Go to **Azure Portal > Subscriptions > Usage + quotas** and filter for the DCas/DCads/ECas/ECads families. Request a quota increase if needed.
+
+3. **Select a VM size.** The pattern defaults to `Standard_DC2as_v5` but supports a configurable list of sizes. The following VM families are relevant for confidential containers on Azure:
+
+| VM Family | CPU | Architecture | Notes |
+|-----------|-----|--------------|-------|
+| `Standard_DC2as_v5` | AMD SEV-SNP | AMD EPYC (Genoa) | Default for this pattern. Smallest CoCo-capable size. |
+| `Standard_DC4as_v5` | AMD SEV-SNP | AMD EPYC (Genoa) | More vCPUs/memory for larger workloads. |
+| `Standard_DC2ads_v5` | AMD SEV-SNP | AMD EPYC (Genoa) | Same as DC2as_v5 with a local temp disk. |
+| `Standard_DC2es_v5` | Intel TDX | Intel Xeon (Sapphire Rapids) | Intel-based confidential VMs. Regional availability is more limited than AMD. |
+
+The available sizes can be configured via the `global.coco.azure.VMFlavours` field in `values-global.yaml` and the sandbox-policies chart overrides. The default VM flavour is set in `global.coco.azure.defaultVMFlavour`.
+
+### RHDP deployment (Red Hat Demo Platform)
+
+For Red Hat associates and partners, the pattern includes wrapper scripts that automate cluster provisioning and deployment using RHDP Azure Open Environments.
+
+Required environment variables (provided by your RHDP environment):
+
+```shell
+export GUID=
+export CLIENT_ID=
+export PASSWORD=
+export TENANT=
+export SUBSCRIPTION=
+export RESOURCEGROUP=
+```
+
+Deployment commands:
+
+- Single cluster: `bash rhdp/wrapper.sh <azure-region>` (e.g. `bash rhdp/wrapper.sh eastasia`)
+- Multi-cluster: `bash rhdp/wrapper-multicluster.sh <azure-region>`
+
+The wrapper scripts handle cluster provisioning via `openshift-install`, secret generation, reference value collection, and pattern installation.

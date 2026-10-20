@@ -1,0 +1,18 @@
+enabled: true
+
+ccManager:
+  enabled: true
+  defaultMode: "on"
+
+kataSandboxDevicePlugin:
+  enabled: true
+
+iommu:
+  enabled: true
+
+runtimeTimeouts:
+  enabled: false
+  seconds: 600
+  pools:
+    - {name: master, role: master}
+    - {name: worker, role: worker}

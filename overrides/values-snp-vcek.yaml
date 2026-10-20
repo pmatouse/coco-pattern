@@ -1,0 +1,4 @@
+# Populate through the standard SNP collateral workflow for offline attestation.
+kbs:
+  snp:
+    vcekSecrets: []

@@ -1,0 +1,123 @@
+# Multi-cluster hub topology for confidential containers.
+# Deploys Trustee (KBS + attestation), HashiCorp Vault, ACM, and cert-manager.
+# Manages spoke clusters imported via ACM with the azure-spoke clusterGroup.
+# Set main.clusterGroupName: trusted-hub in values-global.yaml to use.
+
+clusterGroup:
+  name: trusted-hub
+  isHubCluster: true
+  namespaces:
+  - open-cluster-management
+  - vault
+  - external-secrets-operator:
+      operatorGroup: true
+      targetNamespaces: []
+  - external-secrets
+  - trustee-operator-system
+  - cert-manager-operator
+  - openshift-sandboxed-containers-operator
+  - cert-manager
+  subscriptions:
+    # ACM is kept anticipating
+    acm:
+      name: advanced-cluster-management
+      namespace: open-cluster-management
+    eso:
+      name: openshift-external-secrets-operator
+      namespace: external-secrets-operator
+      channel: stable-v1
+    trustee:
+      name: trustee-operator
+      namespace: trustee-operator-system
+      channel: stable
+      installPlanApproval: Manual
+      csv: trustee-operator.v1.2.1
+    cert-manager:
+      name: openshift-cert-manager-operator
+      namespace: cert-manager-operator
+      channel: stable-v1
+
+  projects:
+  - hub
+  - vault
+  - trustee
+  - external-secrets
+  - sandbox
+  - workloads
+  - default
+  # Explicitly mention the cluster-state based overrides we plan to use for this pattern.
+  # We can use self-referential variables because the chart calls the tpl function with these variables defined
+  sharedValueFiles:
+  - '/overrides/values-{{ $.Values.global.clusterPlatform }}.yaml'
+  - '/overrides/values-{{ $.Values.global.clusterVersion }}.yaml'
+  applications:
+    acm:
+      name: acm
+      namespace: open-cluster-management
+      project: hub
+      chart: acm
+      chartVersion: 0.1.*
+
+    vault:
+      name: vault
+      namespace: vault
+      project: vault
+      chart: hashicorp-vault
+      # Require 0.1.10 or newer within the 0.1.x release series.
+      chartVersion: "~0.1.10"
+
+    secrets-operator:
+      name: openshift-external-secrets
+      namespace: external-secrets
+      project: external-secrets
+      chart: openshift-external-secrets
+      chartVersion: 0.0.*
+
+    trustee:
+      name: trustee
+      namespace: trustee-operator-system
+      project: trustee
+      chart: trustee
+      chartVersion: 0.10.*
+      extraValueFiles:
+        - '/overrides/values-trustee.yaml'
+      overrides:
+        - name: global.coco.secured
+          value: "true"
+    sandbox-policies:
+      name: sandbox-policies
+      namespace: openshift-sandboxed-containers-operator
+      project: sandbox
+      chart: sandboxed-policies
+      chartVersion: 0.2.*
+      overrides:
+        - name: global.coco.azure.tags
+          value: "key1=value1,key2=value2"
+        - name: global.coco.azure.rootVolumeSize
+          value: "20"
+
+
+
+  imperative:
+    jobs:
+    - name: get-azure-deps
+      playbook: ansible/get-azure-deps.yaml
+      verbosity: -vvv
+      timeout: 3600
+    - name: configure-azure-dns
+      playbook: ansible/configure-issuer.yaml
+      verbosity: -vvv
+      timeout: 3600
+    - name: init-data-gzipper
+      playbook: ansible/init-data-gzipper.yaml
+      verbosity: -vvv
+      timeout: 3600
+  managedClusterGroups:
+    azure-spoke:
+      name: azure-spoke
+      acmlabels:
+      - name: clusterGroup
+        value: azure-spoke
+      helmOverrides:
+      - name: clusterGroup.isHubCluster
+        value: false

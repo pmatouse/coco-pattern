@@ -1,0 +1,13 @@
+# Shared trustee chart overrides loaded via extraValueFiles.
+# Common to all profiles: admin format, HTTPS config, secret resources.
+# Profile-specific overrides (tdx, collateralService, gpu, baremetal) stay inline in values-<profile>.yaml.
+kbs:
+  admin:
+    format: "v1.1"
+  https:
+    enabled: false
+  secretResources:
+    - name: "kbsres1"
+      key: "secret/data/hub/kbsres1"
+    - name: "passphrase"
+      key: "secret/data/hub/passphrase"

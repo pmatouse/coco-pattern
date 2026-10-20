@@ -1,0 +1,235 @@
+- name: Gzip initdata and register init data
+  become: false
+  connection: local
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"
+    cluster_platform: "{{ global.clusterPlatform | default('none') | lower }}"
+    hub_domain: "{{ global.hubClusterDomain | default('none')  | lower}}"
+    security_policy_flavour: "{{ global.coco.securityPolicyFlavour | default('insecure') }}"
+    template_src: "initdata-default.toml.tpl"
+    debug_template_src: "initdata-debug.toml.tpl"
+  tasks:
+    - name: Create temporary working directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: initdata
+      register: tmpdir
+    - name: Read KBS TLS secret from Kubernetes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"
+        api_version: v1
+        kind: Secret
+        name: kbs-tls-self-signed
+        namespace: imperative
+      register: kbs_secret_result
+
+    - name: Extract and decode certificate from secret
+      ansible.builtin.set_fact:
+        trustee_cert: "{{ kbs_secret_result.resources[0].data['tls.crt'] | b64decode }}"
+      when: kbs_secret_result.resources | length > 0
+
+    - name: Fail if certificate not found
+      ansible.builtin.fail:
+        msg: "KBS TLS certificate not found in secret 'kbs-tls-self-signed' in namespace 'imperative'"
+      when: kbs_secret_result.resources | length == 0
+
+    - name: Read registry CA cert from Kubernetes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"
+        api_version: v1
+        kind: Secret
+        name: registry-ca
+        namespace: imperative
+      register: ca_secret_result
+
+    - name: Extract and split CA certificates
+      ansible.builtin.shell: |
+        set -o pipefail
+        python3 -c "
+        import base64, sys
+        raw = base64.b64decode(sys.argv[1]).decode('utf-8')
+        certs = []
+        current = []
+        for line in raw.splitlines():
+            if line.strip() == '-----BEGIN CERTIFICATE-----':
+                current = [line]
+            elif line.strip() == '-----END CERTIFICATE-----':
+                current.append(line)
+                certs.append(chr(10).join(current))
+                current = []
+            elif current:
+                current.append(line)
+        print('---CERT_BOUNDARY---'.join(certs), end='')
+        " "{{ ca_secret_result.resources[0].data.pem }}"
+      register: ca_certs_raw
+      changed_when: false
+      when: ca_secret_result.resources | default([]) | length > 0
+
+    - name: Build CA certificate list
+      ansible.builtin.set_fact:
+        registry_ca_certs: "{{ ca_certs_raw.stdout.split('---CERT_BOUNDARY---') | select | list }}"
+      when: ca_certs_raw is defined and ca_certs_raw.rc is defined and ca_certs_raw.rc == 0
+
+    - name: Set empty CA cert list when secret not found
+      ansible.builtin.set_fact:
+        registry_ca_certs: []
+      when: ca_secret_result.resources | default([]) | length == 0
+
+    - name: Define temp file paths
+      ansible.builtin.set_fact:
+        rendered_path: "{{ tmpdir.path }}/rendered.toml"
+        debug_rendered_path: "{{ tmpdir.path }}/debug-rendered.toml"
+
+    - name: Render default template to temp file
+      ansible.builtin.template:
+        src: "{{ template_src }}"
+        dest: "{{ rendered_path }}"
+        mode: "0600"
+
+    - name: Render debug template to temp file
+      ansible.builtin.template:
+        src: "{{ debug_template_src }}"
+        dest: "{{ debug_rendered_path }}"
+        mode: "0600"
+
+    - name: Read raw aa.toml from rendered template
+      ansible.builtin.shell: |
+        set -o pipefail
+        python3 -c "
+        import tomllib
+        with open('{{ rendered_path }}', 'rb') as f:
+            data = tomllib.load(f)
+        print(data['data']['aa.toml'], end='')
+        "
+      register: raw_aa_toml
+      changed_when: false
+
+    - name: Read raw cdh.toml from rendered template
+      ansible.builtin.shell: |
+        set -o pipefail
+        python3 -c "
+        import tomllib
+        with open('{{ rendered_path }}', 'rb') as f:
+            data = tomllib.load(f)
+        print(data['data']['cdh.toml'], end='')
+        "
+      register: raw_cdh_toml
+      changed_when: false
+
+    - name: Read raw policy.rego from default template
+      ansible.builtin.shell: |
+        set -o pipefail
+        python3 -c "
+        import tomllib
+        with open('{{ rendered_path }}', 'rb') as f:
+            data = tomllib.load(f)
+        print(data['data']['policy.rego'], end='')
+        "
+      register: raw_policy_rego
+      changed_when: false
+
+    - name: Read raw policy.rego from debug template
+      ansible.builtin.shell: |
+        set -o pipefail
+        python3 -c "
+        import tomllib
+        with open('{{ debug_rendered_path }}', 'rb') as f:
+            data = tomllib.load(f)
+        print(data['data']['policy.rego'], end='')
+        "
+      register: debug_raw_policy_rego
+      changed_when: false
+
+    - name: Gzip and base64 encode the default rendered content
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat "{{ rendered_path }}" | gzip | base64 -w0
+      register: initdata_encoded
+      changed_when: false
+
+    - name: Gzip and base64 encode the debug rendered content
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat "{{ debug_rendered_path }}" | gzip | base64 -w0
+      register: debug_initdata_encoded
+      changed_when: false
+
+    - name: Compute raw SHA-256 hash of default initdata
+      ansible.builtin.shell: |
+        set -o pipefail
+        sha256sum "{{ rendered_path }}" | cut -d' ' -f1
+      register: raw_hash
+      changed_when: false
+
+    - name: Compute raw SHA-256 hash of debug initdata
+      ansible.builtin.shell: |
+        set -o pipefail
+        sha256sum "{{ debug_rendered_path }}" | cut -d' ' -f1
+      register: debug_raw_hash
+      changed_when: false
+
+    - name: Register init data pcr into a var
+      ansible.builtin.shell: |
+        set -o pipefail
+        initial_pcr=0000000000000000000000000000000000000000000000000000000000000000
+        hash_input="${initial_pcr}{{ raw_hash.stdout }}"
+        hash_cmd='import sys,hashlib; print(hashlib.sha256(bytes.fromhex(sys.stdin.read())).hexdigest())'
+        PCR8_HASH=$(echo -n "${hash_input}" | python3 -c "${hash_cmd}") && echo $PCR8_HASH
+      register: pcr8_hash
+      changed_when: false
+
+    - name: Register debug init data pcr into a var
+      ansible.builtin.shell: |
+        set -o pipefail
+        initial_pcr=0000000000000000000000000000000000000000000000000000000000000000
+        hash_input="${initial_pcr}{{ debug_raw_hash.stdout }}"
+        hash_cmd='import sys,hashlib; print(hashlib.sha256(bytes.fromhex(sys.stdin.read())).hexdigest())'
+        PCR8_HASH=$(echo -n "${hash_input}" | python3 -c "${hash_cmd}") && echo $PCR8_HASH
+      register: debug_pcr8_hash
+      changed_when: false
+
+    - name: Create/update default initdata ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig | default(omit) }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "initdata"
+            namespace: "imperative"
+            labels:
+              coco.io/type: initdata
+          data:
+            INITDATA: "{{ initdata_encoded.stdout }}"
+            PCR8_HASH: "{{ pcr8_hash.stdout }}"
+            RAW_HASH: "{{ raw_hash.stdout }}"
+            version: "0.1.0"
+            algorithm: "sha256"
+            aa.toml: "{{ raw_aa_toml.stdout }}"
+            cdh.toml: "{{ raw_cdh_toml.stdout }}"
+            policy.rego: "{{ raw_policy_rego.stdout }}"
+
+    - name: Create/update debug initdata ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig | default(omit) }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "debug-initdata"
+            namespace: "imperative"
+            labels:
+              coco.io/type: initdata
+          data:
+            INITDATA: "{{ debug_initdata_encoded.stdout }}"
+            PCR8_HASH: "{{ debug_pcr8_hash.stdout }}"
+            RAW_HASH: "{{ debug_raw_hash.stdout }}"
+            version: "0.1.0"
+            algorithm: "sha256"
+            aa.toml: "{{ raw_aa_toml.stdout }}"
+            cdh.toml: "{{ raw_cdh_toml.stdout }}"
+            policy.rego: "{{ debug_raw_policy_rego.stdout }}"

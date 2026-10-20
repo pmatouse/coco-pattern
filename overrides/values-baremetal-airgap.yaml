@@ -1,0 +1,24 @@
+# Airgap / disconnected overlay — loaded ONLY when global.airgap is true
+# (see the sharedValueFiles entry in values-baremetal.yaml).
+# The connected default (global.airgap: false) loads the inert
+# values-baremetal-connected.yaml instead.
+#
+# SCOPE: this overlay applies when ArgoCD renders the clustergroup chart —
+# i.e. to the clusterGroup OLM subscriptions (ESO, CNV, LVMS, trustee,
+# cert-manager, intel-*, ACM, NFD) and the chart values below.
+#
+# It does NOT reach the bootstrap operators: the openshift-gitops-operator
+# and patterns-operator subscriptions are created by the patterns-operator
+# BEFORE ArgoCD renders with this overlay. For airgap, their sources must
+# be set directly in values-global.yaml:
+#   main.gitops.operatorSource: cs-redhat-operator-index-v4-22
+#   main.patternsOperator.source: cs-community-operator-index-v4-22
+global:
+  # Mirrored catalog for the Argo-rendered OLM subscriptions (oc-mirror output)
+  catalogSource: cs-redhat-operator-index-v4-22
+  catalogSourceNamespace: openshift-marketplace
+# Trustee: flip platform collateral to the offline file backend.
+# Collect with `make collect-dcap-collateral` before deploy.
+kbs:
+  tdx:
+    collateralService: "file:///opt/confidential-containers/attestation-service/tdx/platform_collaterals.json"

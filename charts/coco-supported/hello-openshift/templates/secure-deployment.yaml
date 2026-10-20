@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure
+  labels:
+    app: secure
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: secure
+  template:
+    metadata:
+      labels:
+        app: secure
+      annotations:
+        peerpods: "true"
+        coco.io/initdata-configmap: initdata
+        io.katacontainers.config.runtime.create_container_timeout: "900"
+    spec:
+      runtimeClassName: {{ include "hello-openshift.runtimeClassName" . }}
+      containers:
+        - name: hello-openshift
+          image: {{ .Values.image }}
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: web-content
+              mountPath: /var/www/html
+            - name: initdata
+              mountPath: /opt/confidential-containers/initdata
+              readOnly: true
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: web-content
+          configMap:
+            name: secure-web-content
+        - name: initdata
+          configMap:
+            name: initdata
+            optional: false

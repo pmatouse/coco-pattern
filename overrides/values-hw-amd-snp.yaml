@@ -1,0 +1,34 @@
+# Hardware profile: AMD SEV-SNP (no GPU)
+# Disables Intel device plugins, Intel DCAP (PCCS/QGS), and GPU components.
+# AMD SEV-SNP does not require Intel-specific attestation infrastructure.
+# NFD remains enabled — it detects AMD SEV capabilities via cpu-security labels.
+# Enables SNP offline attestation in trustee (VCEK certificate cache).
+# VCEK secrets list comes from generated overrides/values-snp-vcek.yaml.
+
+clusterGroup:
+  subscriptions:
+    intel-device-plugins:
+      disabled: true
+    intel-tdx-dcap:
+      disabled: true
+    gpu-operator:
+      disabled: true
+
+  applications:
+    intel-dcap:
+      disabled: true
+    nvidia-gpu:
+      disabled: true
+    gpu-workload:
+      disabled: true
+
+    # Node has no Intel TDX — skip the TDX MachineConfig (kvm_intel.tdx=1 kernel arg).
+    baremetal:
+      overrides:
+        - name: tdx.enabled
+          value: "false"
+
+    trustee:
+      overrides:
+        - name: kbs.snp.enabled
+          value: "true"

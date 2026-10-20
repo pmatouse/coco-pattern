@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kbs-access-sealed
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: kbs-access-sealed
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kbs-access-sealed
+  template:
+    metadata:
+      labels:
+        app: kbs-access-sealed
+      annotations:
+        coco.io/initdata-configmap: debug-initdata
+    spec:
+      runtimeClassName: {{ .Values.global.coco.runtimeClassName }}
+      containers:
+      - name: httpd
+        image: {{ .Values.image }}
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        volumeMounts:
+        - name: secret-data
+          mountPath: /var/www/html
+          readOnly: true
+        - name: initdata
+          mountPath: /opt/confidential-containers/initdata
+          readOnly: true
+        resources:
+          limits:
+            memory: "2304Mi"
+            cpu: "200m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+      volumes:
+      - name: secret-data
+        secret:
+          secretName: kbs-sealed-secret
+      - name: initdata
+        configMap:
+          name: debug-initdata
+          optional: false

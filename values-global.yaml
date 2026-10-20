@@ -1,0 +1,85 @@
+global:
+  pattern: coco-pattern
+  # singleArgoCD must be under global: (not main:) for the clustergroup chart to read it.
+  # When true, child apps are managed by the vp-gitops ArgoCD instance — no second ArgoCD.
+  singleArgoCD: true
+  multiSourceRepoUrl: quay.io/validatedpatterns
+  storageProvider: lvm  # Options: hpp, lvm, external
+  clusterVersion: "4.22"  # OCP minor version for operator pins. Options: 4.19, 4.20, 4.21
+  # Airgap / disconnected master switch. false (default, connected):
+  # Intel DCAP zero-touch platform registration (vault/ESO PCS API key),
+  # trustee fetches platform collateral directly from Intel PCS.
+  # true (disconnected): set by overrides/values-baremetal-airgap.yaml —
+  # manual PCK provisioning (scripts/dcap-pck.py) and file-backed collateral.
+  airgap: false
+  secretStore:
+    # Warning: This must be present even if it is set to none.
+    backend: vault # none, vault, kubernetes
+  options:
+    useCSV: false
+    syncPolicy: Automatic
+    installPlanApproval: Automatic
+    autoApproveManualInstallPlans: false
+  # This defines whether or not to use upstream resources for CoCo.
+  # Defines whether or not the hub cluster can be used for confidential containers
+  coco:
+    runtimeClassName: "kata-cc" # kata-cc (baremetal), kata-remote (Azure/AWS), kata-cc-nvidia-gpu (GPU)
+    securityPolicyFlavour: "insecure" # insecure, redhat-secure-gpg, redhat-secure-sigstore, signed or reject
+    secured: true # true or false. If true, the cluster will be secured. If false, the cluster will be insecure.
+    bypassAttestation: false
+    # Enable SSH key injection into podvm for debugging. Do not enable in production.
+    # Also requires: COCO_ENABLE_SSH_DEBUG=true ./scripts/gen-secrets.sh
+    # and uncommenting the sshKey block in values-secret.yaml.template.
+    enableSSHDebug: false
+    azure:
+      defaultVMFlavour: "Standard_DC2as_v5"
+      VMFlavours: "Standard_DC2as_v5,Standard_DC4as_v5,Standard_DC8as_v5,Standard_DC16as_v5"
+  rhoai:
+    site: sites/example  # Select your site through its install.yaml and global.extraValueFiles.
+    storageProvider: external  # external (HTTP/existing S3) or odf (install standalone MCG)
+  hardware:
+    profile: intel-tdx-gpu  # RHOAI demo: intel-tdx-gpu or amd-snp-gpu
+  cluster:
+    # Hosted Control Planes (HCP) mode. When true, MachineConfig resources are skipped
+    # (no Machine Config Daemon on HCP workers). The sandboxed-containers operator
+    # auto-detects HCP and uses DaemonSet deployment mode (Tech Preview in OSC 1.13).
+    # For multi-cluster: set false on hub, override to true for HCP spokes via helmOverrides.
+    hcp: false
+main:
+  # Set clusterGroupName to match your deployment topology:
+  #   azure          — Azure single-cluster (all components in one cluster)
+  #   azure-spoke    — Azure spoke (multi-cluster, imported into ACM from trusted-hub)
+  #   baremetal      — Bare metal single-cluster (Intel TDX / AMD SEV-SNP, hardware profile gated)
+  #   baremetal-hub  — Bare metal hub (Trustee + ACM, mixed TDX/SNP, manages baremetal spokes)
+  #   baremetal-spoke — Bare metal spoke (imported into ACM from baremetal-hub)
+  #   trusted-hub    — Hub for multi-cluster Azure (Trustee + ACM, manages azure-spoke clusters)
+  clusterGroupName: baremetal
+  git:
+    # Connected mode: repoURL is inferred from your local git remote.
+    # Disconnected: uncomment and set to the HTTP URL served by git-http-server.py
+    # repoURL: http://JUMP_HOST_IP:8080/coco-pattern.git
+    revision: rhoai-confidential-qwen
+  patternsOperator:
+    # Required for airgap -- set to your mirrored catalog source name
+    # source: cs-community-operator-index-v4-22
+    channel: fast
+  gitops:
+    # Required for airgap -- set to your mirrored catalog source name
+    # operatorSource: cs-redhat-operator-index-v4-22
+    # Keep this channel aligned with airgap/imageset-config-4.22.yaml.
+    channel: gitops-1.22
+  multiSourceConfig:
+    enabled: true
+    clusterGroupChartVersion: 0.9.58
+    # VP OCI Helm charts are mirrored to mirror-registry by oc-mirror additionalImages.
+    # Use mirror-registry directly — no Quay dependency for airgap deploys.
+    helmRepoUrl: quay.io/validatedpatterns
+
+# Common secret store configuration used across multiple charts.
+# NOTE: Charts reference secretStore.* (top-level, not global.secretStore.*).
+# Top-level values do not propagate from values-global.yaml — each application
+# that needs secretStore must declare it via inline overrides in the topology file.
+# This is intentional — it allows different charts to use different secret stores.
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
